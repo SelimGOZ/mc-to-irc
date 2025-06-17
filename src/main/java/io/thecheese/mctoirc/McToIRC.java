@@ -1,12 +1,15 @@
 package io.thecheese.mctoirc;
 
+import org.bukkit.BanList;
 import org.bukkit.Bukkit;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.AsyncPlayerChatEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerKickEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -17,8 +20,10 @@ import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class McToIRC extends JavaPlugin implements Listener {
@@ -35,6 +40,9 @@ public class McToIRC extends JavaPlugin implements Listener {
     private static final String JOIN_MESSAGE = "The Lord Has Joined The Game";
     private static final String QUIT_MESSAGE = "The Lord Has Left The Game";
 
+    private static final Map<String, String> kickReasons = new ConcurrentHashMap<>();
+    private boolean serverStopping = false;
+
     private Socket ircSocket;
     private BufferedReader reader;
     private PrintWriter writer;
@@ -46,31 +54,19 @@ public class McToIRC extends JavaPlugin implements Listener {
     @Override
     public void onEnable() {
         saveDefaultConfig();
-
         loadConfigValues();
-
         connectToIRC();
-
         getServer().getPluginManager().registerEvents(this, this);
-
         startOutputProcessor();
-
-        getLogger().info("IRC Bridge enabled with configuration:");
-        getLogger().info("Server: " + ircServer + ":" + ircPort);
-        getLogger().info("Channel: " + ircChannel);
-        getLogger().info("Bot Name: " + botName);
     }
 
     private void loadConfigValues() {
         FileConfiguration config = getConfig();
-
         ircServer = config.getString("irc.server", "irc.example.net");
         ircPort = config.getInt("irc.port", 6667);
         ircChannel = config.getString("irc.channel", "#example");
-
         String rawBotName = config.getString("irc.botName", "Example");
-        botName = rawBotName.substring(0, Math.min(rawBotName.length(), 35));
-
+        botName = rawBotName.substring(0, Math.min(rawBotName.length(), 20));
         startupEnabled = config.getBoolean("startup.enabled", true);
         startupMessage = config.getString("startup.message", "Example for Example by Example to Example");
         creditsSent = config.getBoolean("startup.credits", false);
@@ -90,14 +86,12 @@ public class McToIRC extends JavaPlugin implements Listener {
 
                     if (startupEnabled && !creditsSent) {
                         writer.println("PRIVMSG " + ircChannel + " :" + startupMessage);
-
                         getConfig().set("startup.credits", true);
                         saveConfig();
                         creditsSent = true;
                     }
 
                     connected.set(true);
-                    getLogger().info("Connected to IRC server");
 
                     String line;
                     while ((line = reader.readLine()) != null) {
@@ -112,13 +106,11 @@ public class McToIRC extends JavaPlugin implements Listener {
                     }
                 } catch (Exception e) {
                     if (running.get()) {
-                        getLogger().warning("IRC connection error: " + e.getMessage());
                     }
                 } finally {
                     connected.set(false);
                     closeResources();
                     if (running.get()) {
-                        getLogger().info("Reconnecting in 10 seconds...");
                         try { Thread.sleep(10000); } catch (InterruptedException ignored) {}
                     }
                 }
@@ -163,7 +155,6 @@ public class McToIRC extends JavaPlugin implements Listener {
             formatted = "§9[IRC] §7<§f" + sender + "§7> §f" + cleanString(message);
             Bukkit.getScheduler().runTask(this, () -> Bukkit.broadcastMessage(formatted));
         } catch (Exception e) {
-            getLogger().warning("Error processing IRC message: " + e.getMessage());
         }
     }
 
@@ -184,11 +175,9 @@ public class McToIRC extends JavaPlugin implements Listener {
                     String message = outQueue.take();
                     if (connected.get() && writer != null) {
                         String clean = message.replaceAll("§[0-9a-fk-or]", "");
-
                         if (clean.length() > 400) {
                             clean = clean.substring(0, 400) + "...";
                         }
-
                         writer.println("PRIVMSG " + ircChannel + " :" + clean);
                     }
                 } catch (InterruptedException e) {
@@ -210,28 +199,70 @@ public class McToIRC extends JavaPlugin implements Listener {
     public void onPlayerJoin(PlayerJoinEvent event) {
         Player player = event.getPlayer();
         String message;
-
         if (SPECIAL_PLAYER.equalsIgnoreCase(player.getName())) {
             message = JOIN_MESSAGE;
         } else {
             message = "[+] " + player.getName() + " joined the game";
         }
+        outQueue.offer(message);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onPlayerKick(PlayerKickEvent event) {
+        Player player = event.getPlayer();
+        String reason = event.getReason();
+        kickReasons.put(player.getName(), reason);
+
+        boolean isBanned = Bukkit.getBanList(BanList.Type.NAME).isBanned(player.getName());
+
+        String message;
+        if (SPECIAL_PLAYER.equalsIgnoreCase(player.getName())) {
+            message = "The Lord Has Been " + (isBanned ? "Banned" : "Kicked") + ": " + reason;
+        } else {
+            message = "[-] " + player.getName() + " was " + (isBanned ? "banned" : "kicked") + ": " + reason;
+        }
+        outQueue.offer(message);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onPlayerQuit(PlayerQuitEvent event) {
+        Player player = event.getPlayer();
+        String playerName = player.getName();
+
+        String kickReason = kickReasons.remove(playerName);
+        if (kickReason != null) {
+            return;
+        }
+
+        boolean isBanned = Bukkit.getBanList(BanList.Type.NAME).isBanned(playerName);
+        boolean isTimeout = !serverStopping && !player.isOnline();
+
+        String message;
+        String reason = "";
+
+        if (isBanned) {
+            reason = " (Banned)";
+        } else if (isTimeout) {
+            reason = " (Timeout)";
+        }
+
+        if (SPECIAL_PLAYER.equalsIgnoreCase(playerName)) {
+            message = QUIT_MESSAGE + reason;
+        } else {
+            message = "[-] " + playerName + " left the game" + reason;
+        }
 
         outQueue.offer(message);
     }
 
-    @EventHandler
-    public void onPlayerQuit(PlayerQuitEvent event) {
-        Player player = event.getPlayer();
-        String message;
-
-        if (SPECIAL_PLAYER.equalsIgnoreCase(player.getName())) {
-            message = QUIT_MESSAGE;
-        } else {
-            message = "[-] " + player.getName() + " left the game";
+    @Override
+    public void onDisable() {
+        serverStopping = true;
+        running.set(false);
+        closeResources();
+        if (ircThread != null && ircThread.isAlive()) {
+            ircThread.interrupt();
         }
-
-        outQueue.offer(message);
     }
 
     private void closeResources() {
@@ -239,17 +270,7 @@ public class McToIRC extends JavaPlugin implements Listener {
             if (writer != null) writer.close();
             if (reader != null) reader.close();
             if (ircSocket != null) ircSocket.close();
-        } catch (IOException e) {
+        } catch (IOException ignored) {
         }
-    }
-
-    @Override
-    public void onDisable() {
-        running.set(false);
-        closeResources();
-        if (ircThread != null && ircThread.isAlive()) {
-            ircThread.interrupt();
-        }
-        getLogger().info("IRC Bridge disabled");
     }
 }
