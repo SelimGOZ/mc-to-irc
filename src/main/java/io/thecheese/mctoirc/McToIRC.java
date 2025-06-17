@@ -1,218 +1,219 @@
 package io.thecheese.mctoirc;
 
 import org.bukkit.Bukkit;
-import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.AsyncPlayerChatEvent;
 import org.bukkit.plugin.java.JavaPlugin;
-import org.pircbotx.Configuration;
-import org.pircbotx.PircBotX;
-import org.pircbotx.hooks.ListenerAdapter;
-import org.pircbotx.hooks.events.ConnectEvent;
-import org.pircbotx.hooks.events.MessageEvent;
 
-import java.io.File;
-import java.io.IOException;
+import java.io.*;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.logging.Level;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class McToIRC extends JavaPlugin implements Listener {
 
-    private PircBotX bot;
-    private final BlockingQueue<String> messageQueue = new LinkedBlockingQueue<>();
-    private volatile boolean connected = false;
-    private FileConfiguration config;
-    private File configFile;
+    private String ircServer;
+    private int ircPort;
+    private String ircChannel;
+    private String botName;
+    private boolean startupEnabled;
+    private String startupMessage;
+    private boolean creditsSent;
 
-    private String ircServer = "irc.wii-linux.org";
-    private int ircPort = 6667;
-    private String ircChannel = "#minecraft";
-    private String botName = "MinecraftBridge";
-    private boolean startupEnabled = true;
-    private String startupMessage = "Wii-Linux IRC to MC Bridging Plugin Brought to you by Selim";
-    private boolean creditsSent = false;
+
+    private Socket ircSocket;
+    private BufferedReader reader;
+    private PrintWriter writer;
+    private Thread ircThread;
+    private final BlockingQueue<String> outQueue = new ArrayBlockingQueue<>(100);
+    private final AtomicBoolean connected = new AtomicBoolean(false);
+    private final AtomicBoolean running = new AtomicBoolean(true);
 
     @Override
     public void onEnable() {
 
-        if (!getDataFolder().exists()) {
-            getDataFolder().mkdirs();
-        }
-
-        configFile = new File(getDataFolder(), "config.yml");
-        if (!configFile.exists()) {
-            saveResource("config.yml", false);
-            getLogger().info("Created default config.yml");
-        }
-
-        config = new YamlConfiguration();
-        try {
-            config.load(configFile);
-            getLogger().info("Loaded config.yml successfully");
-        } catch (IOException | InvalidConfigurationException e) {
-            getLogger().log(Level.SEVERE, "Failed to load config.yml! Using defaults.", e);
-
-            File brokenConfig = new File(getDataFolder(), "config_broken.yml");
-            if (configFile.renameTo(brokenConfig)) {
-                getLogger().warning("Renamed broken config to config_broken.yml");
-            }
-
-            saveResource("config.yml", false);
-            config = YamlConfiguration.loadConfiguration(configFile);
-        }
+        saveDefaultConfig();
 
         loadConfigValues();
 
-        Configuration ircConfig = new Configuration.Builder()
-                .setName(botName)
-                .setServer(ircServer, ircPort)
-                .addAutoJoinChannel(ircChannel)
-                .addListener(new IRCListener(this))
-                .buildConfiguration();
-
-        bot = new PircBotX(ircConfig);
-
-        ircConfig.getListenerManager().addListener(new ListenerAdapter() {
-            @Override
-            public void onConnect(ConnectEvent event) {
-                connected = true;
-                getLogger().info("IRC connection established");
-
-                if (startupEnabled && !creditsSent) {
-                    bot.sendIRC().message(ircChannel, startupMessage);
-
-                    config.set("startup.credits", true);
-                    try {
-                        config.save(configFile);
-                        creditsSent = true;
-                    } catch (IOException e) {
-                        getLogger().warning("Failed to save config: " + e.getMessage());
-                    }
-                }
-
-                new Thread(() -> {
-                    while (!messageQueue.isEmpty()) {
-                        String msg = messageQueue.poll();
-                        if (msg != null) {
-                            bot.sendIRC().message(ircChannel, msg);
-                        }
-                    }
-                }, "Message-Processor").start();
-            }
-        });
-
-        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
-            try {
-                bot.startBot();
-            } catch (Exception e) {
-                getLogger().warning("IRC connection failed: " + e.getMessage());
-                connected = false;
-            }
-        });
+        connectToIRC();
 
         getServer().getPluginManager().registerEvents(this, this);
 
-        startMessageProcessor();
+        startOutputProcessor();
+
+        getLogger().info("IRC Bridge enabled with configuration:");
+        getLogger().info("Server: " + ircServer + ":" + ircPort);
+        getLogger().info("Channel: " + ircChannel);
+        getLogger().info("Bot Name: " + botName);
     }
 
     private void loadConfigValues() {
-        try {
-            if (config.isConfigurationSection("irc")) {
-                ircServer = config.getString("irc.server", ircServer);
-                ircPort = config.getInt("irc.port", ircPort);
-                ircChannel = config.getString("irc.channel", ircChannel);
-                botName = config.getString("irc.botName", botName);
-            }
+        FileConfiguration config = getConfig();
 
-            if (config.isConfigurationSection("startup")) {
-                startupEnabled = config.getBoolean("startup.enabled", startupEnabled);
-                startupMessage = config.getString("startup.message", startupMessage);
-                creditsSent = config.getBoolean("startup.credits", creditsSent);
-            }
-        } catch (Exception e) {
-            getLogger().log(Level.WARNING, "Error loading config values, using defaults", e);
-        }
+        ircServer = config.getString("irc.server", "irc.example.net");
+        ircPort = config.getInt("irc.port", 6667);
+        ircChannel = config.getString("irc.channel", "#example");
 
-        getLogger().info("Config values loaded:");
-        getLogger().info("IRC Server: " + ircServer + ":" + ircPort);
-        getLogger().info("Channel: " + ircChannel);
-        getLogger().info("Bot Name: " + botName);
-        getLogger().info("Startup Enabled: " + startupEnabled);
-        getLogger().info("Startup Message: " + startupMessage);
-        getLogger().info("Credits Sent: " + creditsSent);
+        String rawBotName = config.getString("irc.botName", "Example");
+        botName = rawBotName.substring(0, Math.min(rawBotName.length(), 20));
+
+        startupEnabled = config.getBoolean("startup.enabled", true);
+        startupMessage = config.getString("startup.message", "Example for Example by Example to Example");
+        creditsSent = config.getBoolean("startup.credits", false);
     }
 
-    private void startMessageProcessor() {
-        new Thread(() -> {
-            while (true) {
+    private void connectToIRC() {
+        ircThread = new Thread(() -> {
+            while (running.get()) {
                 try {
-                    String message = messageQueue.take();
-                    if (connected) {
-                        bot.sendIRC().message(ircChannel, message);
+                    ircSocket = new Socket(ircServer, ircPort);
+                    reader = new BufferedReader(new InputStreamReader(ircSocket.getInputStream(), StandardCharsets.UTF_8));
+                    writer = new PrintWriter(new OutputStreamWriter(ircSocket.getOutputStream(), StandardCharsets.UTF_8), true);
+
+                    writer.println("NICK " + botName);
+                    writer.println("USER " + botName + " 0 * :Minecraft IRC Bridge");
+                    writer.println("JOIN " + ircChannel);
+
+                    if (startupEnabled && !creditsSent) {
+                        writer.println("PRIVMSG " + ircChannel + " :" + startupMessage);
+
+                        getConfig().set("startup.credits", true);
+                        saveConfig();
+                        creditsSent = true;
+                    }
+
+                    connected.set(true);
+                    getLogger().info("Connected to IRC server");
+
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        if (line.startsWith("PING")) {
+                            writer.println("PONG " + line.substring(5));
+                            continue;
+                        }
+
+                        if (line.contains("PRIVMSG " + ircChannel)) {
+                            processIRCMessage(line);
+                        }
+                    }
+                } catch (Exception e) {
+                    if (running.get()) {
+                        getLogger().warning("IRC connection error: " + e.getMessage());
+                    }
+                } finally {
+                    connected.set(false);
+                    closeResources();
+                    if (running.get()) {
+                        getLogger().info("Reconnecting in 10 seconds...");
+                        try { Thread.sleep(10000); } catch (InterruptedException ignored) {}
+                    }
+                }
+            }
+        }, "IRC-Connection");
+        ircThread.setDaemon(true);
+        ircThread.start();
+    }
+
+    private void processIRCMessage(String raw) {
+        try {
+            int firstSpace = raw.indexOf(' ');
+            int secondSpace = raw.indexOf(' ', firstSpace + 1);
+            int colonIndex = raw.indexOf(':', 1);
+
+            if (firstSpace <= 0 || secondSpace <= 0 || colonIndex <= 0) return;
+
+            String sender = raw.substring(1, raw.indexOf('!'));
+            String message = raw.substring(colonIndex + 1);
+
+            sender = cleanString(sender);
+
+            String formatted;
+
+            if ("DiscordBridge".equals(sender) && message.startsWith("<")) {
+                int endIdx = message.indexOf('>');
+                if (endIdx > 0) {
+                    String user = message.substring(1, endIdx);
+                    String actualMsg = message.substring(endIdx + 1).trim();
+
+                    int hashIdx = user.indexOf('#');
+                    if (hashIdx > 0) user = user.substring(0, hashIdx);
+
+                    user = cleanString(user);
+
+                    formatted = "§5[Discord] §7<§f" + user + "§7> §f" + actualMsg;
+                    Bukkit.getScheduler().runTask(this, () -> Bukkit.broadcastMessage(formatted));
+                    return;
+                }
+            }
+
+            formatted = "§9[IRC] §7<§f" + sender + "§7> §f" + cleanString(message);
+            Bukkit.getScheduler().runTask(this, () -> Bukkit.broadcastMessage(formatted));
+        } catch (Exception e) {
+            getLogger().warning("Error processing IRC message: " + e.getMessage());
+        }
+    }
+
+    private String cleanString(String input) {
+        StringBuilder clean = new StringBuilder(input.length());
+        for (char c : input.toCharArray()) {
+            if (c >= 32 || (c >= 9 && c <= 13)) {
+                clean.append(c);
+            }
+        }
+        return clean.toString();
+    }
+
+    private void startOutputProcessor() {
+        Thread outputThread = new Thread(() -> {
+            while (running.get()) {
+                try {
+                    String message = outQueue.take();
+                    if (connected.get() && writer != null) {
+                        String clean = message.replaceAll("§[0-9a-fk-or]", "");
+
+                        if (clean.length() > 400) {
+                            clean = clean.substring(0, 400) + "...";
+                        }
+
+                        writer.println("PRIVMSG " + ircChannel + " :" + clean);
                     }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    break;
                 }
             }
-        }, "Message-Processor").start();
-    }
-
-    @Override
-    public void onDisable() {
-        if (bot != null && bot.isConnected()) {
-            bot.sendIRC().quitServer("Plugin disabled");
-        }
+        }, "IRC-Output");
+        outputThread.setDaemon(true);
+        outputThread.start();
     }
 
     @EventHandler
     public void onPlayerChat(AsyncPlayerChatEvent event) {
         String message = "<" + event.getPlayer().getName() + "> " + event.getMessage();
-        messageQueue.offer(message);
+        outQueue.offer(message);
     }
 
-    private static class IRCListener extends ListenerAdapter {
-        private final McToIRC plugin;
-
-        public IRCListener(McToIRC plugin) {
-            this.plugin = plugin;
+    private void closeResources() {
+        try {
+            if (writer != null) writer.close();
+            if (reader != null) reader.close();
+            if (ircSocket != null) ircSocket.close();
+        } catch (IOException e) {
         }
+    }
 
-        @Override
-        public void onMessage(MessageEvent event) {
-            if (event.getUser().getNick().equals(plugin.bot.getNick())) return;
-
-            String sender = event.getUser().getNick();
-            String message = event.getMessage();
-
-            sender = sender.replaceAll("\\p{C}", "");
-
-            String prefix = "§9[IRC]";
-            String formatted;
-
-            if ("DiscordBridge".equals(sender) && message.startsWith("<") && message.contains(">")) {
-                int endIdx = message.indexOf('>');
-                String user = message.substring(1, endIdx);
-                String actualMsg = message.substring(endIdx + 1).trim();
-
-                int hashIdx = user.indexOf('#');
-                if (hashIdx > 0) user = user.substring(0, hashIdx);
-
-                user = user.replaceAll("\\p{C}", "");
-
-                prefix = "§5[Discord]";
-                formatted = prefix + " §7<§f" + user + "§7> §f" + actualMsg;
-            } else {
-                formatted = prefix + " §7<§f" + sender + "§7> §f" + message;
-            }
-
-            Bukkit.getScheduler().runTask(plugin, () -> {
-                Bukkit.broadcastMessage(formatted);
-            });
+    @Override
+    public void onDisable() {
+        running.set(false);
+        closeResources();
+        if (ircThread != null && ircThread.isAlive()) {
+            ircThread.interrupt();
         }
+        getLogger().info("IRC Bridge disabled");
     }
 }

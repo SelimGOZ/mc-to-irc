@@ -21,8 +21,6 @@ repositories {
 
 dependencies {
     compileOnly("com.destroystokyo.paper:paper-api:1.9.4-R0.1-SNAPSHOT")
-    implementation 'org.pircbotx:pircbotx:2.1'
-    implementation 'org.slf4j:slf4j-simple:1.7.36'
 }
 
 tasks {

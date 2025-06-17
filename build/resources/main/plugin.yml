@@ -1,4 +1,0 @@
-name: mc-to-irc
-version: '1.0-SNAPSHOT'
-main: io.thecheese.mctoirc.McToIRC
-api-version: '1.8.8'

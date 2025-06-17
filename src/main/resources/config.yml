@@ -6,7 +6,7 @@ irc:
   port: 6667
   # Channel to join
   channel: "#example"
-  # Bot nickname (20 Character Cap)
+  # Bot nickname (35 Character Cap - Can Differ per IRC)
   botName: "Example"
 
 startup:
