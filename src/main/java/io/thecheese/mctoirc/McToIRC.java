@@ -286,7 +286,7 @@ public class McToIRC extends JavaPlugin implements Listener {
             long maxMemory = Runtime.getRuntime().maxMemory() / (1024 * 1024);
             long allocatedMemory = Runtime.getRuntime().totalMemory() / (1024 * 1024);
             long freeMemory = Runtime.getRuntime().freeMemory() / (1024 * 1024);
-            double cpuLoad = getCpuLoad();
+            String cpuPercent = getCpuUsage();
 
             int entities = 0;
             int players = Bukkit.getOnlinePlayers().size();
@@ -296,16 +296,16 @@ public class McToIRC extends JavaPlugin implements Listener {
 
             String tps = "Unknown";
             try {
-                if (Bukkit.getServer().getClass().getMethod("getTPS") != null) {
-                    double[] tpsArray = Bukkit.getTPS();
-                    tps = df.format(tpsArray[0]) + ", " + df.format(tpsArray[1]) + ", " + df.format(tpsArray[2]);
-                }
-            } catch (NoSuchMethodException ignored) {}
+                Object minecraftServer = Bukkit.getServer().getClass().getMethod("getServer").invoke(Bukkit.getServer());
+                double[] recentTps = (double[]) minecraftServer.getClass().getField("recentTps").get(minecraftServer);
+                tps = df.format(recentTps[0]) + ", " + df.format(recentTps[1]) + ", " + df.format(recentTps[2]);
+            } catch (Exception e) {
+            }
 
             return String.format(
-                    "TPS: %s | CPU: %s%% | Memory: %d/%dMB | Entities: %d | Players: %d",
+                    "TPS: %s | CPU: %s | Memory: %d/%dMB | Entities: %d | Players: %d",
                     tps,
-                    df.format(cpuLoad * 100),
+                    cpuPercent,
                     allocatedMemory - freeMemory,
                     maxMemory,
                     entities,
@@ -316,15 +316,34 @@ public class McToIRC extends JavaPlugin implements Listener {
         }
     }
 
-    private double getCpuLoad() {
+    private long lastCpuTime = 0;
+    private long lastSampleTime = 0;
+
+    private String getCpuUsage() {
         try {
             OperatingSystemMXBean osBean = ManagementFactory.getOperatingSystemMXBean();
-            if (osBean instanceof com.sun.management.OperatingSystemMXBean) {
-                return ((com.sun.management.OperatingSystemMXBean) osBean).getProcessCpuLoad();
+            com.sun.management.OperatingSystemMXBean sunOsBean =
+                    (com.sun.management.OperatingSystemMXBean) osBean;
+
+            long currentTime = System.nanoTime();
+            long cpuTime = sunOsBean.getProcessCpuTime();
+
+            if (lastCpuTime > 0 && lastSampleTime > 0) {
+                long elapsedTime = currentTime - lastSampleTime;
+                long elapsedCpu = cpuTime - lastCpuTime;
+
+                if (elapsedTime > 0) {
+                    double cpuUsage = Math.min(100.0, (elapsedCpu * 100.0) / (elapsedTime * osBean.getAvailableProcessors()));
+                    DecimalFormat df = new DecimalFormat("0.00");
+                    return df.format(cpuUsage) + "%";
+                }
             }
-            return osBean.getSystemLoadAverage() / osBean.getAvailableProcessors();
+
+            lastCpuTime = cpuTime;
+            lastSampleTime = currentTime;
+            return "0.00%";
         } catch (Exception e) {
-            return -1;
+            return "N/A";
         }
     }
 }
