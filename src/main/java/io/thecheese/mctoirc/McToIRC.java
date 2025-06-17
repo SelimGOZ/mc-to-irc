@@ -2,13 +2,19 @@ package io.thecheese.mctoirc;
 
 import org.bukkit.Bukkit;
 import org.bukkit.configuration.file.FileConfiguration;
-import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.AsyncPlayerChatEvent;
+import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 
-import java.io.*;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -25,6 +31,9 @@ public class McToIRC extends JavaPlugin implements Listener {
     private String startupMessage;
     private boolean creditsSent;
 
+    private static final String SPECIAL_PLAYER = "TechflashYT";
+    private static final String JOIN_MESSAGE = "The Lord Has Joined The Game";
+    private static final String QUIT_MESSAGE = "The Lord Has Left The Game";
 
     private Socket ircSocket;
     private BufferedReader reader;
@@ -36,7 +45,6 @@ public class McToIRC extends JavaPlugin implements Listener {
 
     @Override
     public void onEnable() {
-
         saveDefaultConfig();
 
         loadConfigValues();
@@ -61,7 +69,7 @@ public class McToIRC extends JavaPlugin implements Listener {
         ircChannel = config.getString("irc.channel", "#example");
 
         String rawBotName = config.getString("irc.botName", "Example");
-        botName = rawBotName.substring(0, Math.min(rawBotName.length(), 20));
+        botName = rawBotName.substring(0, Math.min(rawBotName.length(), 35));
 
         startupEnabled = config.getBoolean("startup.enabled", true);
         startupMessage = config.getString("startup.message", "Example for Example by Example to Example");
@@ -195,6 +203,34 @@ public class McToIRC extends JavaPlugin implements Listener {
     @EventHandler
     public void onPlayerChat(AsyncPlayerChatEvent event) {
         String message = "<" + event.getPlayer().getName() + "> " + event.getMessage();
+        outQueue.offer(message);
+    }
+
+    @EventHandler
+    public void onPlayerJoin(PlayerJoinEvent event) {
+        Player player = event.getPlayer();
+        String message;
+
+        if (SPECIAL_PLAYER.equalsIgnoreCase(player.getName())) {
+            message = JOIN_MESSAGE;
+        } else {
+            message = "[+] " + player.getName() + " joined the game";
+        }
+
+        outQueue.offer(message);
+    }
+
+    @EventHandler
+    public void onPlayerQuit(PlayerQuitEvent event) {
+        Player player = event.getPlayer();
+        String message;
+
+        if (SPECIAL_PLAYER.equalsIgnoreCase(player.getName())) {
+            message = QUIT_MESSAGE;
+        } else {
+            message = "[-] " + player.getName() + " left the game";
+        }
+
         outQueue.offer(message);
     }
 
