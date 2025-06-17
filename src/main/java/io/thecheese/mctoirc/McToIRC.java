@@ -2,6 +2,9 @@ package io.thecheese.mctoirc;
 
 import org.bukkit.BanList;
 import org.bukkit.Bukkit;
+import org.bukkit.ChatColor;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -12,18 +15,22 @@ import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerKickEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.scheduler.BukkitRunnable;
 
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
+import java.lang.management.ManagementFactory;
+import java.lang.management.OperatingSystemMXBean;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.text.DecimalFormat;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class McToIRC extends JavaPlugin implements Listener {
@@ -40,7 +47,7 @@ public class McToIRC extends JavaPlugin implements Listener {
     private static final String JOIN_MESSAGE = "The Lord Has Joined The Game";
     private static final String QUIT_MESSAGE = "The Lord Has Left The Game";
 
-    private static final Map<String, String> kickReasons = new ConcurrentHashMap<>();
+    private final Map<String, String> kickReasons = new HashMap<>();
     private boolean serverStopping = false;
 
     private Socket ircSocket;
@@ -105,8 +112,6 @@ public class McToIRC extends JavaPlugin implements Listener {
                         }
                     }
                 } catch (Exception e) {
-                    if (running.get()) {
-                    }
                 } finally {
                     connected.set(false);
                     closeResources();
@@ -213,13 +218,11 @@ public class McToIRC extends JavaPlugin implements Listener {
         String reason = event.getReason();
         kickReasons.put(player.getName(), reason);
 
-        boolean isBanned = Bukkit.getBanList(BanList.Type.NAME).isBanned(player.getName());
-
         String message;
         if (SPECIAL_PLAYER.equalsIgnoreCase(player.getName())) {
-            message = "The Lord Has Been " + (isBanned ? "Banned" : "Kicked") + ": " + reason;
+            message = "The Lord Has Been Kicked: " + reason;
         } else {
-            message = "[-] " + player.getName() + " was " + (isBanned ? "banned" : "kicked") + ": " + reason;
+            message = "[-] " + player.getName() + " was kicked: " + reason;
         }
         outQueue.offer(message);
     }
@@ -235,21 +238,12 @@ public class McToIRC extends JavaPlugin implements Listener {
         }
 
         boolean isBanned = Bukkit.getBanList(BanList.Type.NAME).isBanned(playerName);
-        boolean isTimeout = !serverStopping && !player.isOnline();
 
         String message;
-        String reason = "";
-
-        if (isBanned) {
-            reason = " (Banned)";
-        } else if (isTimeout) {
-            reason = " (Timeout)";
-        }
-
         if (SPECIAL_PLAYER.equalsIgnoreCase(playerName)) {
-            message = QUIT_MESSAGE + reason;
+            message = QUIT_MESSAGE + (isBanned ? " (Banned)" : "");
         } else {
-            message = "[-] " + playerName + " left the game" + reason;
+            message = "[-] " + playerName + " left the game" + (isBanned ? " (Banned)" : "");
         }
 
         outQueue.offer(message);
@@ -271,6 +265,71 @@ public class McToIRC extends JavaPlugin implements Listener {
             if (reader != null) reader.close();
             if (ircSocket != null) ircSocket.close();
         } catch (IOException ignored) {
+        }
+    }
+
+    @Override
+    public boolean onCommand(CommandSender sender, Command cmd, String label, String[] args) {
+        if (cmd.getName().equalsIgnoreCase("tpss")) {
+            new BukkitRunnable() {
+                @Override
+                public void run() {
+                    String stats = getServerStats();
+                    Bukkit.broadcastMessage(ChatColor.GOLD + "[Server Stats] " + ChatColor.RESET + stats);
+                    outQueue.offer("[Server Stats] " + stats);
+                }
+            }.runTaskAsynchronously(this);
+            return true;
+        }
+        return false;
+    }
+
+    private String getServerStats() {
+        try {
+            DecimalFormat df = new DecimalFormat("0.00");
+
+            long maxMemory = Runtime.getRuntime().maxMemory() / (1024 * 1024);
+            long allocatedMemory = Runtime.getRuntime().totalMemory() / (1024 * 1024);
+            long freeMemory = Runtime.getRuntime().freeMemory() / (1024 * 1024);
+            double cpuLoad = getCpuLoad();
+
+            int entities = 0;
+            int players = Bukkit.getOnlinePlayers().size();
+            for (org.bukkit.World world : Bukkit.getWorlds()) {
+                entities += world.getEntities().size();
+            }
+
+            String tps = "Unknown";
+            try {
+                if (Bukkit.getServer().getClass().getMethod("getTPS") != null) {
+                    double[] tpsArray = Bukkit.getTPS();
+                    tps = df.format(tpsArray[0]) + ", " + df.format(tpsArray[1]) + ", " + df.format(tpsArray[2]);
+                }
+            } catch (NoSuchMethodException ignored) {}
+
+            return String.format(
+                    "TPS: %s | CPU: %s%% | Memory: %d/%dMB | Entities: %d | Players: %d",
+                    tps,
+                    df.format(cpuLoad * 100),
+                    allocatedMemory - freeMemory,
+                    maxMemory,
+                    entities,
+                    players
+            );
+        } catch (Exception e) {
+            return "Error gathering server stats";
+        }
+    }
+
+    private double getCpuLoad() {
+        try {
+            OperatingSystemMXBean osBean = ManagementFactory.getOperatingSystemMXBean();
+            if (osBean instanceof com.sun.management.OperatingSystemMXBean) {
+                return ((com.sun.management.OperatingSystemMXBean) osBean).getProcessCpuLoad();
+            }
+            return osBean.getSystemLoadAverage() / osBean.getAvailableProcessors();
+        } catch (Exception e) {
+            return -1;
         }
     }
 }
